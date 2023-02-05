@@ -1,0 +1,4 @@
+This repository contians code used in the Distributed Deep Learning trianing session from the KSL Data science training serise. 
+The exercises and examples container training an image classifier on CIFAR10 Dataset on Ibex GPUs and Shaheen2 CPUs. 
+
+

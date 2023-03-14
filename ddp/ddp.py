@@ -101,11 +101,11 @@ def accuracy(outputs, labels):
 def dataloader(gpu,world_size,batch_size,num_workers):
     
     trainSampler_shuffle=True 
-    version=float(re.findall(r'\d+\.\d+', torch.__version__)[0])
-    #if version > 1.12:
-    #    print('Setting shuffle=False in trainSampler')
-    #    trainSampler_shuffle=False 
-    
+#    version=float(re.findall(r'\d+\.\d+', torch.__version__)[0])
+#   if version > 1.12:
+#        print('Setting shuffle=False in trainSampler')
+#        trainSampler_shuffle=False 
+    trainSampler_shuffle=False
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                                      std=[0.229, 0.224, 0.225])
 # Prepare training data
@@ -142,13 +142,14 @@ def dataloader(gpu,world_size,batch_size,num_workers):
     valSampler = torch.utils.data.distributed.DistributedSampler(valset,
                                                                   num_replicas=world_size,
                                                                   rank=gpu,
-                                                                 shuffle=False)
+                                                                  shuffle=False)
     valloader = torch.utils.data.DataLoader(valset, 
                                              batch_size=batch_size,
                                              shuffle=False, 
                                              num_workers=num_workers,
                                              pin_memory=True,
-                                             sampler=valSampler)
+                                             sampler=valSampler,
+                                             drop_last=True)
     return trainloader,valloader
 
 
@@ -182,10 +183,22 @@ net=torchvision.models.resnet50(weights=None,num_classes=200)
 # In[9]:
 
 
-def setup(rank, world_size):
+def setup():
 
-    # initialize the process group
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+    dist_url = "env://" # default
+
+    # only works with torch.distributed.launch // torch.run
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ['WORLD_SIZE'])
+    local_rank = int(os.environ['LOCAL_RANK'])
+    
+    print (f"{local_rank} : {world_size} , {rank} \n")
+    dist.init_process_group(
+            backend="nccl",
+            init_method=dist_url,
+            world_size=world_size,
+            rank=rank)
 
 def cleanup():
     dist.destroy_process_group()
@@ -194,13 +207,15 @@ def cleanup():
 # In[10]:
 
 
-def train (net,world_size,rank,args):
-    
-    if 'LOCAL_RANK' in os.environ.keys():
-        gpu_id=int(os.environ['LOCAL_RANK'])
-    else:
-        gpu_id=rank
-    
+def train (net,args):
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ['WORLD_SIZE'])
+    gpu_id=int(os.environ['LOCAL_RANK'])
+
+    # this will make all .cuda() calls work properly
+    torch.cuda.set_device(gpu_id)
+    # synchronizes all the threads to reach this point before moving on
+    dist.barrier()
     # Instantiate Tensorboard writer on process handler for GPU 0
     if rank == 0:
         writer = SummaryWriter("logs/experiment_%s" %(os.environ['SLURM_JOBID']))
@@ -209,9 +224,9 @@ def train (net,world_size,rank,args):
     
     # Enable AMP
     scaler = amp.GradScaler()
-    net.cuda(gpu_id)
+    net.cuda()
     
-    criterion = nn.CrossEntropyLoss().cuda(gpu_id)
+    criterion = nn.CrossEntropyLoss().cuda()
     optimizer = optim.SGD(net.parameters(), 
                           lr=args.lr, 
                           momentum=args.momentum,
@@ -232,18 +247,21 @@ def train (net,world_size,rank,args):
         train_acc  = 0
         trainloader.sampler.set_epoch(epoch)
         net.train()
+        print(f'{rank}: Entering training loop for epoch {epoch}')
         for i, data in enumerate(trainloader):
             # get the inputs; data is a list of [inputs, labels]
-            inputs, labels = data[0].cuda(gpu_id, non_blocking=True), data[1].cuda(gpu_id,non_blocking=True)
+            inputs, labels = data[0].cuda(), data[1].cuda()
         
             # zero the parameter gradients
             optimizer.zero_grad()
 
             # forward + backward + optimize
             with torch.cuda.amp.autocast(enabled=True,
-                                         dtype=torch.float32):
+                                       dtype=torch.float32):
                 outputs = net(inputs)
                 loss = criterion(outputs, labels)
+            #loss.backward()
+            #optimizer.step()
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -252,31 +270,35 @@ def train (net,world_size,rank,args):
             train_acc  += accuracy(outputs,labels)           
             
         valloader.sampler.set_epoch(epoch)
+        del data
         val_loss = 0.0
         val_acc  = 0
         net.eval()
+        print(f'{rank}: Entering validation for epoch {epoch}')
         for i, data in enumerate(valloader):
-            inputs, labels = data[0].cuda(gpu_id,non_blocking=True), data[1].cuda(gpu_id,non_blocking=True)
+            inputs, labels = data[0].cuda(), data[1].cuda()
             with torch.no_grad():
                 outputs = net(inputs)
                 loss = criterion(outputs, labels)
             val_loss += loss.item() 
             val_acc  += accuracy(outputs,labels)
             
+        print(f'{rank}: Collecting metric for epoch {epoch}')
         # Gather accuracy metric from all training units on GPU 0  
         # to calculate an average over the size training dataset 
-        train_loss = torch.tensor(train_loss).cuda(gpu_id)
+        train_loss = torch.tensor(train_loss).cuda()
         dist.reduce(train_loss,0,dist.ReduceOp.SUM)
-        train_acc = torch.tensor(train_acc).cuda(gpu_id)
+        train_acc = torch.tensor(train_acc).cuda()
         dist.reduce(train_acc,0,dist.ReduceOp.SUM)
         
-        val_loss = torch.tensor(val_loss).cuda(gpu_id)
+        val_loss = torch.tensor(val_loss).cuda()
         dist.reduce(val_loss,0,dist.ReduceOp.SUM)
-        val_acc = torch.tensor(val_acc).cuda(gpu_id)  
+        val_acc = torch.tensor(val_acc).cuda()  
         dist.reduce(val_acc,0,dist.ReduceOp.SUM)
 
         # Print from GPU 0
         if rank == 0:
+            print(f'{rank}: Writing metric for epoch {epoch}')
             train_loss = train_loss.item() / len(trainloader.dataset.targets)
             train_acc  = 100 * (train_acc.item() / len(trainloader.dataset.targets))
             
@@ -307,17 +329,12 @@ def train (net,world_size,rank,args):
 
 
 def main(net,args):
-    world_size = args.gpus
-    setup(rank, world_size)
-    train(net,world_size,rank,args)
+    setup()
+    train(net,args)
     return True
 
 # Uncomment when using as python script
 if __name__ == '__main__':
-    world_size= int(os.environ['WORLD_SIZE'])
-    rank      = int(os.environ['RANK'])
-    local_rank= int(os.environ['LOCAL_RANK'])
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-workers", default=10,
                         help="number of dataloaders", type=int)
@@ -334,11 +351,7 @@ if __name__ == '__main__':
     parser.add_argument("--print-interval", default=100,
                         help="Momentum", type=int)
     args = parser.parse_args()
-    
-    setup(rank, world_size)
-    # Pre-training
-    train(net,world_size,rank,args)
-    cleanup()
-# In[12]:
+ 
+    main(net,args)
 
 

@@ -6,7 +6,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --constraint=a100
 #SBATCH --time=03:00:00
-#SBATCH --account=c2227
+#SBATCH --reservation=DS-TRAINING
 
 
 #source /ibex/ai/home/$USER/miniconda3/bin/activate dist-pytorch

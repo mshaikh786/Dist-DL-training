@@ -1,0 +1,22 @@
+#!/bin/bash 
+
+#SBATCH --time=00:05:00
+#SBATCH --ntasks=8
+#SBATCH --tasks-per-node=4
+#SBATCH --cpus-per-task=4
+#SBATCH --gpus=8
+#SBATCH --gpus-per-node=4
+#SBATCH --constraint=a100
+#SBATCH --reservation=DS-TRAINING
+
+
+scontrol show job ${SLURM_JOBID} 
+module load dl
+module load jax/23.10-sif
+
+export IMAGE=$JAX_IMAGE
+
+srun -n ${SLURM_NTASKS} -N ${SLURM_NNODES} singularity run --nv $IMAGE \
+	python allreduce.py
+
+

@@ -134,9 +134,9 @@ class CLASSIFY_lit_module(pl.LightningModule):
         optimizer = optim.SGD(self.parameters(), lr=1e-3)
         
         # We will reduce the learning rate by 0.1 after 100 and 150 epochs
-        scheduler = optim.lr_scheduler.StepLR(optimizer, 
-                                              step_size=30, gamma=0.1)
-        return [optimizer], [scheduler]
+        #scheduler = optim.lr_scheduler.StepLR(optimizer, 
+        #                                      step_size=30, gamma=0.1)
+        return [optimizer] #, [scheduler]
 
     def training_step(self, batch, batch_idx):
         # "batch" is the output of the training data loader.
